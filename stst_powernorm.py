@@ -21,7 +21,23 @@ def set_seed(seed):
 set_seed(42)
 
 
-# -----------------------------------------------------------
+class PowerNorm(nn.Module):
+    def __init__(self, num_features, eps=1e-5):
+        super(PowerNorm, self).__init__()
+        self.eps = eps
+        self.gamma = nn.Parameter(torch.ones(num_features))
+        self.beta = nn.Parameter(torch.zeros(num_features))
+
+    def forward(self, x):
+        mean = x.mean(dim=[1], keepdim=True)
+        var = ((x - mean) ** 2).mean(dim=[1], keepdim=True)
+        std = torch.sqrt(var + self.eps)
+        normed = (x - mean) / std
+        return self.gamma * normed + self.beta
+
+
+
+# ---------------------------------------------------------
 # 1. Transformer Encoder Block using multi-head self-attention,
 #    residual connections, and post-normalization (LayerNorm).
 # -----------------------------------------------------------
@@ -45,8 +61,8 @@ class TransformerEncoderBlock(nn.Module):
         )
         
         # Post-norm style
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
+        self.norm1 = PowerNorm(d_model)
+        self.norm2 = PowerNorm(d_model)
         
         # Separate dropout for attention vs. feed-forward
         self.dropout_attn = nn.Dropout(attn_dropout)

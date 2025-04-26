@@ -170,9 +170,10 @@ def train_model(
     train_accs,   val_accs   = [], []
     train_props0, train_props1 = [], []
     val_props0,   val_props1   = [], []
+    train_lrs = [] 
 
     best_val_loss = float('inf')
-    patience, triggers = 50, 0
+    patience, triggers = 120, 0
     best_wts = model.state_dict()
 
     for epoch in range(1, num_epochs+1):
@@ -186,6 +187,9 @@ def train_model(
             loss.backward()
             optimizer.step()
             scheduler.step()
+        
+        current_lr = optimizer.param_groups[0]['lr']
+        train_lrs.append(current_lr)
 
         # — éval sur TRAIN —
         model.eval()
@@ -275,7 +279,7 @@ def train_model(
 
     # recharger le meilleur modèle
     model.load_state_dict(best_wts)
-    return model, train_losses, val_losses, train_accs, val_accs, train_props0, train_props1, val_props0, val_props1
+    return model, train_losses, val_losses, train_accs, val_accs, train_props0, train_props1, val_props0, val_props1, train_lrs
 
 
 
@@ -289,14 +293,14 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Hyperparameters from your paper's best settings
-    processed_data_folder = "data/stocknet-dataset-processed"
+    processed_data_folder = "data/stocknet-dataset-processed"#data/stocknet-dataset-processed"
     date2vec_model_path = r"Date2Vec/d2v_model/d2v_98291_17.169918439404636.pth"
     
     window_size = 32
     batch_size = 32
     lr = 5.35e-6
     warmup_steps = 25000
-    num_epochs = 96
+    num_epochs = 120
     
     # Transformer parameters
     num_transformer_layers = 4
@@ -411,7 +415,7 @@ if __name__ == "__main__":
         writer.writeheader()
 
     training_start = time()
-    model, train_losses, val_losses, train_accs, val_accs, train_props0, train_props1, val_props0, val_props1 = train_model(
+    model, train_losses, val_losses, train_accs, val_accs, train_props0, train_props1, val_props0, val_props1, train_lrs = train_model(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -495,29 +499,37 @@ if __name__ == "__main__":
     print(f"Testing took {time() - start_test:.2f} seconds.")
 
     epochs = list(range(1, len(train_losses)+1))
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18,5))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+    ax1 = axes[0,0]
+    ax2 = axes[0,1]
+    ax3 = axes[1,0]
+    ax4 = axes[1,1]
 
     # 1) Loss
     ax1.plot(epochs, train_losses, label="Train Loss")
     ax1.plot(epochs, val_losses,   label="Val Loss")
-    ax1.set_title("Loss");     ax1.set_xlabel("Epoch"); ax1.set_ylabel("Loss")
+    ax1.set_title("Loss"); ax1.set_xlabel("Epoch"); ax1.set_ylabel("Loss")
     ax1.legend(); ax1.grid()
 
     # 2) Accuracy
     ax2.plot(epochs, train_accs, label="Train Acc")
     ax2.plot(epochs, val_accs,   label="Val Acc")
-    ax2.set_title("Accuracy"); ax2.set_xlabel("Epoch"); ax2.set_ylabel("Accuracy")
+    ax2.set_title("Accuracy"); ax2.set_xlabel("Epoch"); ax2.set_ylabel("Acc")
     ax2.legend(); ax2.grid()
 
     # 3) Proportions de classes
-    ax3.plot(epochs, train_props0, label="Train ⌀0")
-    ax3.plot(epochs, train_props1, label="Train ⌀1")
-    ax3.plot(epochs,   val_props0, label="Val ⌀0", linestyle="--")
-    ax3.plot(epochs,   val_props1, label="Val ⌀1", linestyle="--")
-    ax3.set_title("Proportions prédictions")
-    ax3.set_xlabel("Epoch"); ax3.set_ylabel("Proportion")
+    ax3.plot(epochs, train_props0, label="Train 0");  ax3.plot(epochs, train_props1, label="Train 1")
+    ax3.plot(epochs,   val_props0, '--', label="Val 0"); ax3.plot(epochs,   val_props1, '--', label="Val 1")
+    ax3.set_title("Proportions prédictions"); ax3.set_xlabel("Epoch"); ax3.set_ylabel("Prop")
     ax3.legend(); ax3.grid()
 
+    # 4) Learning rate
+    ax4.plot(epochs, train_lrs, label="LR")
+    ax4.set_title("Learning Rate"); ax4.set_xlabel("Epoch"); ax4.set_ylabel("LR")
+    ax4.grid()
+
     plt.tight_layout()
-    plt.savefig("train_val_metrics_with_props.png")
-    plt.close(fig)                # ← closes the figure to free memory
+    plt.savefig("train_val_metrics_with_lr.png")
+    plt.close(fig)
+             # ← closes the figure to free memory

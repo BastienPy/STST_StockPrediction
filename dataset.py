@@ -29,25 +29,31 @@ class SpatiotemporalEmbed(nn.Module):
         self.f = f
         self.time_emb_dim = time_emb_dim
         self.d = d
-        # Dense layer: maps (window_size * f + time_emb_dim) -> d
-        self.dense = nn.Linear(window_size * f + time_emb_dim, d)
+        # Now expect only one timestep's f features + time embedding
+        self.dense = nn.Linear(f + time_emb_dim, d)
 
     def forward(self, X_f: torch.Tensor, X_t: torch.Tensor, date2vec):
         N, f = X_f.shape
-        assert N == self.window_size, f"Expected N={self.window_size}, got {N}"
-        assert f == self.f, f"Expected f={self.f}, got {f}"
-        X_f0 = X_f.reshape(-1)  # Flattened non-time features
+        assert N == self.window_size and f == self.f
+
         E_list = []
         for i in range(N):
-            time_row_2d = X_t[i].unsqueeze(0)  # (1,6)
+            # per-timestep spatial features
+            f_i = X_f[i]                       # shape: (f,)
+
+            # get that timestep's time embedding
+            time_row = X_t[i].unsqueeze(0)     # shape: (1, time_input_dim)
             with torch.no_grad():
-                t_embed = date2vec(time_row_2d)  # (1, time_emb_dim)
-            t_embed = t_embed.view(-1)  # (time_emb_dim,)
-            X_c_i = torch.cat([X_f0, t_embed], dim=0)  # (window_size * f + time_emb_dim,)
-            E_i = self.dense(X_c_i)  # (d,)
-            E_list.append(E_i)
-        E_X = torch.stack(E_list, dim=0)  # (N, d)
+                t_embed = date2vec(time_row)   # shape: (1, time_emb_dim)
+            t_embed = t_embed.view(-1)        # shape: (time_emb_dim,)
+
+            # concatenate and project
+            X_c_i = torch.cat([f_i, t_embed], dim=0)  # shape: (f + time_emb_dim,)
+            E_list.append(self.dense(X_c_i))          # shape: (d,)
+
+        E_X = torch.stack(E_list, dim=0)  # shape: (N, d)
         return E_X
+
 
 # ----------------------------------------------------------------
 #  3) Define a Dataset that supports caching of preprocessed sequences.
@@ -159,12 +165,28 @@ class StockDataset(Dataset):
                 X_t_list = []
                 for row_i in range(self.window_size):
                     row_data = window_df.iloc[row_i]
+                    # spatial features (unchanged)
                     fvals = [float(row_data[col]) for col in self.non_time_cols]
                     X_f_list.append(fvals)
-                    dt = row_data["Date"]
-                    X_t_list.append([0, 0, 0, dt.year, dt.month, dt.day])
+                    # use the scaled time features you already computed in feature_engineering.py
+                    # new: pad up to 6 dims so Date2Vec’s fc1 can multiply
+                    X_t_list.append([
+                        float(row_data["Year"]),    # 1: year/3000
+                        float(row_data["Month"]),   # 2: month/12
+                        float(row_data["Day"]),     # 3: day/31
+                        float(row_data["Weekday"]), # 4: weekday/7
+                        0.0,                        # 5: dummy
+                        0.0                         # 6: dummy
+                    ])
                 X_f_np = np.array(X_f_list, dtype=np.float32)
                 X_t_np = np.array(X_t_list, dtype=np.float32)
+
+                # ─── Normalisation ───
+                # on centre-réduit chaque colonne de X_f_np
+                mean = X_f_np.mean(axis=0, keepdims=True)    # shape (1, f)
+                std  = X_f_np.std(axis=0,  keepdims=True)    # shape (1, f)
+                X_f_np = (X_f_np - mean) / (std + 1e-6)       # évite la div. par zéro
+                
                 X_f_torch = torch.from_numpy(X_f_np)
                 X_t_torch = torch.from_numpy(X_t_np)
                 with torch.no_grad():
@@ -195,18 +217,14 @@ def collate_fn(batch):
 # ----------------------------------------------------------------
 if __name__ == "__main__":
     folder_processed = "data/stocknet-dataset-processed"
-    date2vec_path = "Date2Vec\\d2v_model\\d2v_98291_17.169918439404636.pth"
+    date2vec_path = "Date2Vec/d2v_model/d2v_98291_17.169918439404636.pth"
     window_size = 32
     non_time_feature_cols = [
-        "SMA_10","SMA_30","SMA_50","SMA_200",
-        "EMA_10","EMA_30","EMA_50","EMA_200",
-        "MOM_10","STOCHRSIk","STOCHRSId","STOCHk","STOCHd",
-        "MACD","MACD_signal","CCI_14","MFI_14","AD","OBV","ROC_10",
-        "SIG_SMA_10","SIG_SMA_30","SIG_SMA_50","SIG_SMA_200",
-        "SIG_EMA_10","SIG_EMA_30","SIG_EMA_50","SIG_EMA_200",
-        "SIG_MOM","SIG_STOCHRSI","SIG_STOCH_K","SIG_STOCH_D",
-        "SIG_MACD","SIG_CCI","SIG_MFI","SIG_AD","SIG_OBV","SIG_ROC",
-        "Open", "High", "Low", "Close", "Volume", "Adj Close"]
+    "Open", "High", "Low", "Close", "Adj Close", "Volume",
+    *[f"SIG_SMA_{i}" for i in (10, 30, 50, 200)],
+    *[f"SIG_EMA_{i}" for i in (10, 30, 50, 200)],
+    "SIG_MOM", "SIG_STOCHRSI", "SIG_STOCH_K", "SIG_STOCH_D",
+    "SIG_MACD", "SIG_CCI", "SIG_MFI", "SIG_AD", "SIG_OBV", "SIG_ROC"]
     out_embed_dim = 64
 
     # Example: load the training split using a cache file.

@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F 
 import numpy as np
-from sklearn.metrics import accuracy_score, matthews_corrcoef
+from sklearn.metrics import accuracy_score, matthews_corrcoef, roc_curve, f1_score
+from collections import Counter
 
 import copy
 from time import time
@@ -167,9 +168,11 @@ def train_model(
     # listes pour plot
     train_losses, val_losses = [], []
     train_accs,   val_accs   = [], []
+    train_props0, train_props1 = [], []
+    val_props0,   val_props1   = [], []
 
     best_val_loss = float('inf')
-    patience, triggers = 10, 0
+    patience, triggers = 50, 0
     best_wts = model.state_dict()
 
     for epoch in range(1, num_epochs+1):
@@ -239,6 +242,10 @@ def train_model(
         prop1_val = val_c1  / val_total
 
         # stocker pour le plot
+        train_props0.append(prop0_tr)
+        train_props1.append(prop1_tr)
+        val_props0.append(prop0_val)
+        val_props1.append(prop1_val)
         train_losses.append(train_loss)
         train_accs.append(train_acc)
         val_losses.append(val_loss)
@@ -268,7 +275,7 @@ def train_model(
 
     # recharger le meilleur modèle
     model.load_state_dict(best_wts)
-    return model, train_losses, val_losses, train_accs, val_accs
+    return model, train_losses, val_losses, train_accs, val_accs, train_props0, train_props1, val_props0, val_props1
 
 
 
@@ -288,8 +295,8 @@ if __name__ == "__main__":
     window_size = 32
     batch_size = 32
     lr = 5.35e-6
-    warmup_steps = 2500
-    num_epochs = 100
+    warmup_steps = 25000
+    num_epochs = 96
     
     # Transformer parameters
     num_transformer_layers = 4
@@ -304,7 +311,7 @@ if __name__ == "__main__":
     d_lstm_hidden = 256
     
     # Classifier hidden dimension (the MLP after LSTM)
-    classifier_hidden = 64
+    classifier_hidden = 128
     
     # Columns
     non_time_feature_cols = [
@@ -379,7 +386,20 @@ if __name__ == "__main__":
 
     # Optimizer and loss
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.BCEWithLogitsLoss()  # Binary classification
+
+    # 1) Récupère tous les labels de train
+    labels = [y for (_, y) in train_dataset.sequences]  # sequences = [(E_X, y), ...]
+    cnt    = Counter(labels)
+    n0, n1 = cnt[0], cnt[1]
+
+    # 2) Construis le pos_weight
+    pos_weight = torch.tensor([n0 / n1], dtype=torch.float, device=device)
+    print(f"  → pos_weight = {pos_weight.item():.3f} (n0={n0}, n1={n1})")
+
+    # 3) Instancie ta loss pondérée
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+    #criterion = nn.BCEWithLogitsLoss()  # Binary classification
     print(f"Model instantiation took {time() - instantation_start:.2f} seconds.")
     
     print("Starting training...")
@@ -391,7 +411,7 @@ if __name__ == "__main__":
         writer.writeheader()
 
     training_start = time()
-    model, train_losses, val_losses, train_accs, val_accs = train_model(
+    model, train_losses, val_losses, train_accs, val_accs, train_props0, train_props1, val_props0, val_props1 = train_model(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -409,6 +429,35 @@ if __name__ == "__main__":
     all_targets = []
 
     start_test = time()
+
+    # --- calcul du seuil optimal sur la VAL ---
+    model.eval()
+    all_val_probs   = []
+    all_val_targets = []
+
+    with torch.no_grad():
+        for Xv, yv in val_loader:
+            Xv = Xv.to(device)
+            yv = yv.to(device).float()
+            logits = model(Xv)
+            probs  = torch.sigmoid(logits)
+            all_val_probs.extend(probs.cpu().numpy())
+            all_val_targets.extend(yv.cpu().numpy())
+
+    # ROC pour récupérer thresholds
+    #fpr, tpr, thresholds = roc_curve(all_val_targets, all_val_probs)
+    # maximise Youden’s J = tpr − fpr
+    #j_scores      = tpr - fpr
+    #ix_opt        = np.argmax(j_scores)
+    #opt_threshold = thresholds[ix_opt]
+    #print(f"Seuil optimal sur VAL  = {opt_threshold:.3f} (J={j_scores[ix_opt]:.3f})")
+
+    threshs = np.linspace(np.min(all_val_probs), np.max(all_val_probs), 100)
+    f1s = [f1_score(all_val_targets, np.array(all_val_probs)>=t) for t in threshs]
+    best_idx = np.argmax(f1s)
+    opt_threshold = threshs[best_idx]            # ← on l’appelle opt_threshold
+    print(f"Seuil F1-optimal = {opt_threshold:.3f} (F1={f1s[best_idx]:.3f})")
+
     model.eval()
     with torch.no_grad():
         for X_test, y_test in test_loader:
@@ -416,9 +465,20 @@ if __name__ == "__main__":
             y_test = y_test.to(device).float()
             
             outputs = model(X_test)            # (batch,)
-            preds = (outputs >= 0.5).long().cpu().numpy()
+            preds = (torch.sigmoid(outputs) >= opt_threshold).long().cpu().numpy()
+            #preds = (outputs >= 0.5).long().cpu().numpy()
             all_preds.extend(preds)
             all_targets.extend(y_test.cpu().numpy())
+
+    #Vérfier la distribution de logits
+    test_probs = []
+    with torch.no_grad():
+        for X_test, _ in test_loader:
+            X_test = X_test.to(device)
+            logits = model(X_test)
+            test_probs.extend(torch.sigmoid(logits).cpu().numpy())
+
+    print(f"Test probs  min={np.min(test_probs):.3f}, mean={np.mean(test_probs):.3f},  max={np.max(test_probs):.3f}")
 
     # Compute Accuracy:
     acc = accuracy_score(all_targets, all_preds)
@@ -426,25 +486,38 @@ if __name__ == "__main__":
     # Compute MCC:
     mcc = matthews_corrcoef(all_targets, all_preds)
 
-    print(f"Test Accuracy: {acc:.4f}")
+    n0 = all_preds.count(0)
+    n1 = all_preds.count(1)
+    total = n0 + n1
+    print(f"Test preds 0→{n0/total:.2%}, 1→{n1/total:.2%}")
+    print(f"Test Accuracy: {acc:.4f}  |  Test MCC: {mcc:.4f}")
     print(f"Test MCC: {mcc:.4f}")
     print(f"Testing took {time() - start_test:.2f} seconds.")
 
     epochs = list(range(1, len(train_losses)+1))
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12,5))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18,5))
 
+    # 1) Loss
     ax1.plot(epochs, train_losses, label="Train Loss")
     ax1.plot(epochs, val_losses,   label="Val Loss")
-    ax1.set_title("Loss")
-    ax1.set_xlabel("Epoch"); ax1.set_ylabel("Loss")
+    ax1.set_title("Loss");     ax1.set_xlabel("Epoch"); ax1.set_ylabel("Loss")
     ax1.legend(); ax1.grid()
 
+    # 2) Accuracy
     ax2.plot(epochs, train_accs, label="Train Acc")
     ax2.plot(epochs, val_accs,   label="Val Acc")
-    ax2.set_title("Accuracy")
-    ax2.set_xlabel("Epoch"); ax2.set_ylabel("Accuracy")
+    ax2.set_title("Accuracy"); ax2.set_xlabel("Epoch"); ax2.set_ylabel("Accuracy")
     ax2.legend(); ax2.grid()
 
+    # 3) Proportions de classes
+    ax3.plot(epochs, train_props0, label="Train ⌀0")
+    ax3.plot(epochs, train_props1, label="Train ⌀1")
+    ax3.plot(epochs,   val_props0, label="Val ⌀0", linestyle="--")
+    ax3.plot(epochs,   val_props1, label="Val ⌀1", linestyle="--")
+    ax3.set_title("Proportions prédictions")
+    ax3.set_xlabel("Epoch"); ax3.set_ylabel("Proportion")
+    ax3.legend(); ax3.grid()
+
     plt.tight_layout()
-    plt.savefig("train_val_metrics.png")
-    plt.close(fig)                 # ← closes the figure to free memory
+    plt.savefig("train_val_metrics_with_props.png")
+    plt.close(fig)                # ← closes the figure to free memory

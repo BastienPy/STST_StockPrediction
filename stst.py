@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 
 from powernorm.mask_powernorm import MaskPowerNorm as PowerNorm
 
-# Réglage déterministe des graines aléatoires
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -23,10 +22,7 @@ def set_seed(seed):
 
 set_seed(314)
 
-# -----------------------------------------------------------
-# 1. Transformer Encoder Block avec multi-head self-attention,
-#    connexions résiduelles et post-normalization (PowerNorm).
-# -----------------------------------------------------------
+#Transformer Encoder Block with multi-head, self-attention and residual connexions and post-normalization (PowerNorm)
 class TransformerEncoderBlock(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward, attn_dropout=0.1, ff_dropout=0.3):
         super().__init__()
@@ -56,9 +52,7 @@ class TransformerEncoderBlock(nn.Module):
         x = x.permute(1, 0, 2)
         return x
 
-# -----------------------------------------------------------
-# 2. Transformer Encoder comme enchaînement de blocks encoder.
-# -----------------------------------------------------------
+#Transformer Encoder
 class TransformerEncoder(nn.Module):
     def __init__(self, num_layers, d_model, nhead, dim_feedforward,
                  attn_dropout=0.1, ff_dropout=0.3):
@@ -78,9 +72,7 @@ class TransformerEncoder(nn.Module):
             x = layer(x)
         return x
 
-# -----------------------------------------------------------
-# 3. Modèle STST avec LSTM et PowerNorm dans le Transformer.
-# -----------------------------------------------------------
+#STST Model with LSTM and PowerNorm in the Transformer.
 class STSTModel(nn.Module):
     def __init__(self, d_model, num_layers, nhead, dim_feedforward,
                  attn_dropout, ff_dropout, n_lstm_layers, d_lstm_hidden,
@@ -114,9 +106,7 @@ class STSTModel(nn.Module):
         logits  = self.classifier(final_h).squeeze(-1)
         return logits
 
-# -----------------------------------------------------------
-# 4. Scheduler de warmup du learning rate (augmentation linéaire initiale).
-# -----------------------------------------------------------
+# Warmup Scheduler for the learning rate
 class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
     def __init__(self, optimizer, warmup_steps, last_epoch=-1):
         self.warmup_steps = warmup_steps
@@ -129,9 +119,7 @@ class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
         else:
             return [base_lr for base_lr in self.base_lrs]
 
-# -----------------------------------------------------------
-# 5. Boucle d'entraînement avec Early Stopping.
-# -----------------------------------------------------------
+# Training function
 def train_model(
     model, train_loader, val_loader,
     num_epochs, optimizer, criterion,
@@ -172,7 +160,7 @@ def train_model(
 
         train_lrs.append(optimizer.param_groups[0]['lr'])
 
-        # — Éval TRAIN —
+        # Evaluation on train and val sets
         model.eval()
         t_loss = t_corr = t_tot = 0
         t_c0 = t_c1 = 0
@@ -194,7 +182,6 @@ def train_model(
         train_acc  = t_corr / t_tot
         prop0_tr, prop1_tr = t_c0 / t_tot, t_c1 / t_tot
 
-        # — Éval VAL —
         v_loss = v_corr = v_tot = 0
         v_c0 = v_c1 = 0
         with torch.no_grad():
@@ -261,16 +248,14 @@ def train_model(
         train_lrs
     )
 
-# -----------------------------------------------------------
-# 6. Script d'entraînement complet
-# -----------------------------------------------------------
+# Whole script to run the model
 if __name__ == "__main__":
     from torch.utils.data import DataLoader
     from dataset import StockDataset, collate_fn
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Hyperparamètres
+    # Hyperparameters
     processed_data_folder = "data/stocknet-dataset-processed"
     date2vec_model_path   = "Date2Vec/d2v_model/d2v_98291_17.169918439404636.pth"
     window_size    = 32
@@ -288,7 +273,7 @@ if __name__ == "__main__":
     d_lstm_hidden  = 256
     classifier_hidden = 256
 
-
+    #Non-time features to use
     non_time_feature_cols = [
         "Open","High","Low","Close","Adj Close","Volume",
         *[f"SIG_SMA_{i}" for i in (10,30,50,200)],
@@ -350,9 +335,9 @@ if __name__ == "__main__":
         classifier_hidden=classifier_hidden
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-3)
-    criterion = nn.BCEWithLogitsLoss()  # ou Soft+Hybrid si souhaité
+    criterion = nn.BCEWithLogitsLoss()
 
-    # Entraînement
+    #Training
     model, train_losses, val_losses, \
         train_accs, val_accs, \
         train_p0, train_p1, val_p0, val_p1, \
@@ -363,7 +348,7 @@ if __name__ == "__main__":
             save_path="best.pth", log_path="val_debug.csv"
         )
 
-    # Évaluation sur test
+    #Test set evaluation
     all_preds, all_targets = [], []
     with torch.no_grad():
         for X_test, y_test in test_loader:
@@ -374,7 +359,7 @@ if __name__ == "__main__":
             all_preds.extend(preds)
             all_targets.extend(y_test.detach().cpu().numpy())
 
-    # AUC
+    #AUC
     test_probs = []
     with torch.no_grad():
         for X_test, _ in test_loader:
@@ -388,7 +373,7 @@ if __name__ == "__main__":
     print(f"Test preds 0→{all_preds.count(0)/len(all_preds):.2%}, 1→{all_preds.count(1)/len(all_preds):.2%}")
     print(f"Test Accuracy: {acc:.4f}  |  Test MCC: {mcc:.4f}  |  Test AUC: {auc:.4f}")
 
-    # Plot métriques
+    #Plotting training and validation metrics
     epochs = np.arange(1, len(train_losses)+1)
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     ax1, ax2, ax3, ax4 = axes.flatten()

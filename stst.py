@@ -2,9 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F 
 import numpy as np
-from sklearn.metrics import accuracy_score, matthews_corrcoef, roc_curve, f1_score
-from collections import Counter
-
+from sklearn.metrics import accuracy_score, matthews_corrcoef, roc_auc_score
 import copy
 from time import time
 import random
@@ -13,8 +11,7 @@ import matplotlib.pyplot as plt
 
 from powernorm.mask_powernorm import MaskPowerNorm as PowerNorm
 
-# Set deterministic seeds
-
+# Réglage déterministe des graines aléatoires
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -24,12 +21,11 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-set_seed(24)
-
+set_seed(314)
 
 # -----------------------------------------------------------
-# 1. Transformer Encoder Block using multi-head self-attention,
-#    residual connections, and post-normalization (PowerNorm).
+# 1. Transformer Encoder Block avec multi-head self-attention,
+#    connexions résiduelles et post-normalization (PowerNorm).
 # -----------------------------------------------------------
 class TransformerEncoderBlock(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward, attn_dropout=0.1, ff_dropout=0.3):
@@ -39,9 +35,6 @@ class TransformerEncoderBlock(nn.Module):
         )
         self.norm1 = PowerNorm(d_model)
         self.norm2 = PowerNorm(d_model)
-        #from torch.nn import LayerNorm
-        #self.norm1 = LayerNorm(d_model)
-        #self.norm2 = LayerNorm(d_model)
         self.dropout_attn = nn.Dropout(attn_dropout)
         self.dropout_ff   = nn.Dropout(ff_dropout)
         self.ffn = nn.Sequential(
@@ -53,20 +46,23 @@ class TransformerEncoderBlock(nn.Module):
     def forward(self, x):
         attn_out, _ = self.self_attn(x, x, x)
         x = x + self.dropout_attn(attn_out)
+        x = x.permute(1, 0, 2)
         x = self.norm1(x)
+        x = x.permute(1, 0, 2)
         ff_out = self.ffn(x)
         x = x + self.dropout_ff(ff_out)
+        x = x.permute(1, 0, 2)
         x = self.norm2(x)
+        x = x.permute(1, 0, 2)
         return x
 
-
 # -----------------------------------------------------------
-# 2. Transformer Encoder as a stack of encoder blocks.
+# 2. Transformer Encoder comme enchaînement de blocks encoder.
 # -----------------------------------------------------------
 class TransformerEncoder(nn.Module):
     def __init__(self, num_layers, d_model, nhead, dim_feedforward,
                  attn_dropout=0.1, ff_dropout=0.3):
-        super(TransformerEncoder, self).__init__()
+        super().__init__()
         self.layers = nn.ModuleList([
             TransformerEncoderBlock(
                 d_model=d_model,
@@ -82,16 +78,14 @@ class TransformerEncoder(nn.Module):
             x = layer(x)
         return x
 
-
 # -----------------------------------------------------------
-# 3. STST Model with LSTM and PowerNorm in Transformer.
+# 3. Modèle STST avec LSTM et PowerNorm dans le Transformer.
 # -----------------------------------------------------------
 class STSTModel(nn.Module):
     def __init__(self, d_model, num_layers, nhead, dim_feedforward,
                  attn_dropout, ff_dropout, n_lstm_layers, d_lstm_hidden,
                  classifier_hidden):
         super().__init__()
-        # Transformer
         self.encoder = TransformerEncoder(
             num_layers=num_layers,
             d_model=d_model,
@@ -100,12 +94,10 @@ class STSTModel(nn.Module):
             attn_dropout=attn_dropout,
             ff_dropout=ff_dropout
         )
-        # LSTM
         self.lstm = nn.LSTM(
             input_size=d_model, hidden_size=d_lstm_hidden,
             num_layers=n_lstm_layers, batch_first=True
         )
-        # Classifier sans sigmoid
         self.classifier = nn.Sequential(
             nn.Linear(d_lstm_hidden, classifier_hidden),
             nn.ReLU(),
@@ -114,40 +106,31 @@ class STSTModel(nn.Module):
         )
 
     def forward(self, x):
-        x0 = x             # (batch, seq, d_model)
-        x_enc = self.encoder(x0)      # <-- ici on utilise TransformerEncoder.forward
-
-        # Résidu
+        x0 = x
+        x_enc = self.encoder(x0)
         x = F.gelu(x_enc + x0)
-
-        # LSTM + MLP
         lstm_out, (h_n, c_n) = self.lstm(x)
         final_h = h_n[-1]
         logits  = self.classifier(final_h).squeeze(-1)
         return logits
 
 # -----------------------------------------------------------
-# 4. Learning Rate Warmup Scheduler (linear warmup).
+# 4. Scheduler de warmup du learning rate (augmentation linéaire initiale).
 # -----------------------------------------------------------
 class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
     def __init__(self, optimizer, warmup_steps, last_epoch=-1):
         self.warmup_steps = warmup_steps
-        super(WarmupScheduler, self).__init__(optimizer, last_epoch)
+        super().__init__(optimizer, last_epoch)
     
     def get_lr(self):
-        # Linear warmup for first 'warmup_steps' steps
         if self.last_epoch < self.warmup_steps:
             scale = float(self.last_epoch + 1) / float(self.warmup_steps)
-            warmed_lrs = [base_lr * scale for base_lr in self.base_lrs]
-            #print(f"LRs warmed up to: {warmed_lrs} due to the following epoch: {self.last_epoch}")
-            return warmed_lrs
+            return [base_lr * scale for base_lr in self.base_lrs]
         else:
-            warmed_lrs = [base_lr for base_lr in self.base_lrs]
-            #print(f"LRs not warmed up: {warmed_lrs}")
-            return warmed_lrs
+            return [base_lr for base_lr in self.base_lrs]
 
 # -----------------------------------------------------------
-# 5. Training Loop with Early Stopping.
+# 5. Boucle d'entraînement avec Early Stopping.
 # -----------------------------------------------------------
 def train_model(
     model, train_loader, val_loader,
@@ -158,26 +141,25 @@ def train_model(
     model.to(device)
     scheduler = WarmupScheduler(optimizer, warmup_steps)
 
-    # CSV writer si besoin
     writer = None
     if log_path:
         f = open(log_path, "w", newline="")
-        writer = csv.DictWriter(f, fieldnames=["epoch","batch_idx","mean_prob","count_0","count_1"])
+        writer = csv.DictWriter(f, fieldnames=[
+            "epoch", "batch_idx", "mean_prob", "count_0", "count_1"
+        ])
         writer.writeheader()
 
-    # listes pour plot
     train_losses, val_losses = [], []
     train_accs,   val_accs   = [], []
     train_props0, train_props1 = [], []
     val_props0,   val_props1   = [], []
-    train_lrs = [] 
+    train_lrs = []
 
     best_val_loss = float('inf')
-    patience, triggers = 120, 0
+    patience, triggers = 10, 0
     best_wts = model.state_dict()
 
     for epoch in range(1, num_epochs+1):
-        # — entraînement —
         model.train()
         for Xb, yb in train_loader:
             Xb, yb = Xb.to(device), yb.to(device).float()
@@ -187,14 +169,13 @@ def train_model(
             loss.backward()
             optimizer.step()
             scheduler.step()
-        
-        current_lr = optimizer.param_groups[0]['lr']
-        train_lrs.append(current_lr)
 
-        # — éval sur TRAIN —
+        train_lrs.append(optimizer.param_groups[0]['lr'])
+
+        # — Éval TRAIN —
         model.eval()
-        train_loss = train_correct = train_total = 0
-        train_c0 = train_c1 = 0
+        t_loss = t_corr = t_tot = 0
+        t_c0 = t_c1 = 0
         with torch.no_grad():
             for Xb, yb in train_loader:
                 Xb, yb = Xb.to(device), yb.to(device).float()
@@ -203,20 +184,19 @@ def train_model(
                 probs  = torch.sigmoid(logits)
                 preds  = (probs >= 0.5).long()
 
-                train_loss    += loss.item() * Xb.size(0)
-                train_correct += (preds == yb.long()).sum().item()
-                train_total   += Xb.size(0)
-                train_c0      += (preds == 0).sum().item()
-                train_c1      += (preds == 1).sum().item()
+                t_loss    += loss.item() * Xb.size(0)
+                t_corr    += (preds == yb.long()).sum().item()
+                t_tot     += Xb.size(0)
+                t_c0      += (preds == 0).sum().item()
+                t_c1      += (preds == 1).sum().item()
 
-        train_loss /= train_total
-        train_acc  = train_correct / train_total
-        prop0_tr = train_c0 / train_total
-        prop1_tr = train_c1 / train_total
+        train_loss = t_loss / t_tot
+        train_acc  = t_corr / t_tot
+        prop0_tr, prop1_tr = t_c0 / t_tot, t_c1 / t_tot
 
-        # — éval sur VAL —
-        val_loss = val_correct = val_total = 0
-        val_c0 = val_c1 = 0
+        # — Éval VAL —
+        v_loss = v_corr = v_tot = 0
+        v_c0 = v_c1 = 0
         with torch.no_grad():
             for batch_idx, (Xv, yv) in enumerate(val_loader):
                 Xv, yv = Xv.to(device), yv.to(device).float()
@@ -225,49 +205,43 @@ def train_model(
                 probs  = torch.sigmoid(logits)
                 preds  = (probs >= 0.5).long()
 
-                val_loss    += loss.item() * Xv.size(0)
-                val_correct += (preds == yv.long()).sum().item()
-                val_total   += Xv.size(0)
-                val_c0      += (preds == 0).sum().item()
-                val_c1      += (preds == 1).sum().item()
+                v_loss    += loss.item() * Xv.size(0)
+                v_corr    += (preds == yv.long()).sum().item()
+                v_tot     += Xv.size(0)
+                v_c0      += (preds == 0).sum().item()
+                v_c1      += (preds == 1).sum().item()
 
                 if writer:
                     writer.writerow({
-                        "epoch": epoch,
+                        "epoch":     epoch,
                         "batch_idx": batch_idx,
-                        "mean_prob": probs.mean().item(),
-                        "count_0": int((preds==0).sum().item()),
-                        "count_1": int((preds==1).sum().item()),
+                        "mean_prob": float(probs.mean().cpu()),
+                        "count_0":   int((preds == 0).sum().cpu()),
+                        "count_1":   int((preds == 1).sum().cpu()),
                     })
 
-        val_loss /= val_total
-        val_acc  = val_correct / val_total
-        prop0_val = val_c0  / val_total
-        prop1_val = val_c1  / val_total
+        val_loss = v_loss / v_tot
+        val_acc  = v_corr / v_tot
+        prop0_val, prop1_val = v_c0 / v_tot, v_c1 / v_tot
 
-        # stocker pour le plot
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        train_accs.append(train_acc)
+        val_accs.append(val_acc)
         train_props0.append(prop0_tr)
         train_props1.append(prop1_tr)
         val_props0.append(prop0_val)
         val_props1.append(prop1_val)
-        train_losses.append(train_loss)
-        train_accs.append(train_acc)
-        val_losses.append(val_loss)
-        val_accs.append(val_acc)
 
-        # affichage complet
-        print(f"Epoch {epoch} TRAIN Loss={train_loss:.4f} | Acc={train_acc:.4f} "
-              f"| preds 0→{prop0_tr:.2%}, 1→{prop1_tr:.2%}")
-        print(f"           VAL   Loss={val_loss:.4f} | Acc={val_acc:.4f} "
-              f"| preds 0→{prop0_val:.2%}, 1→{prop1_val:.2%}")
+        print(f"Epoch {epoch}  TRAIN Loss={train_loss:.4f}|Acc={train_acc:.4f}|0→{prop0_tr:.2%},1→{prop1_tr:.2%}")
+        print(f"             VAL   Loss={val_loss:.4f}|Acc={val_acc:.4f}|0→{prop0_val:.2%},1→{prop1_val:.2%}")
 
-        # early stopping + sauvegarde best
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             triggers = 0
             best_wts = model.state_dict()
             torch.save(best_wts, save_path)
-            print(f"  ↳ Nouvelle meilleure val_loss={val_loss:.4f}, modèle sauvé→ `{save_path}`")
+            print(f"  ↳ Nouvelle meilleure val_loss={val_loss:.4f}, modèle sauvegardé")
         else:
             triggers += 1
             if triggers >= patience:
@@ -277,58 +251,54 @@ def train_model(
     if writer:
         f.close()
 
-    # recharger le meilleur modèle
     model.load_state_dict(best_wts)
-    return model, train_losses, val_losses, train_accs, val_accs, train_props0, train_props1, val_props0, val_props1, train_lrs
-
-
+    return (
+        model,
+        train_losses, val_losses,
+        train_accs,   val_accs,
+        train_props0, train_props1,
+        val_props0,   val_props1,
+        train_lrs
+    )
 
 # -----------------------------------------------------------
-# 6. Example Usage: Training Script
+# 6. Script d'entraînement complet
 # -----------------------------------------------------------
 if __name__ == "__main__":
     from torch.utils.data import DataLoader
-    from dataset import StockDataset, collate_fn  # Make sure dataset.py is in the same folder
-    
+    from dataset import StockDataset, collate_fn
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Hyperparameters from your paper's best settings
-    processed_data_folder = "data/stocknet-dataset-processed"#data/stocknet-dataset-processed"
-    date2vec_model_path = r"Date2Vec/d2v_model/d2v_98291_17.169918439404636.pth"
-    
-    window_size = 32
-    batch_size = 32
-    lr = 5.35e-6
-    warmup_steps = 25000
-    num_epochs = 120
-    
-    # Transformer parameters
-    num_transformer_layers = 4
-    nhead = 4
-    d_model = 64
-    dim_feedforward = 2048
-    attn_dropout = 0.1
-    ff_dropout = 0.3
-    
-    # LSTM parameters
-    n_lstm_layers = 2
-    d_lstm_hidden = 256
-    
-    # Classifier hidden dimension (the MLP after LSTM)
-    classifier_hidden = 128
-    
-    # Columns
+
+    # Hyperparamètres
+    processed_data_folder = "data/stocknet-dataset-processed"
+    date2vec_model_path   = "Date2Vec/d2v_model/d2v_98291_17.169918439404636.pth"
+    window_size    = 32
+    batch_size     = 32
+    lr             = 5e-6
+    warmup_steps   = 2500
+    num_epochs     = 50
+    num_transformer_layers = 6
+    nhead          = 4
+    d_model         = 64
+    dim_ff          = 1024
+    attn_dropout    = 0.1
+    ff_dropout      = 0.3
+    n_lstm_layers  = 2
+    d_lstm_hidden  = 256
+    classifier_hidden = 256
+
+
     non_time_feature_cols = [
-    "Open", "High", "Low", "Close", "Adj Close", "Volume",
-    *[f"SIG_SMA_{i}" for i in (10, 30, 50, 200)],
-    *[f"SIG_EMA_{i}" for i in (10, 30, 50, 200)],
-    "SIG_MOM", "SIG_STOCHRSI", "SIG_STOCH_K", "SIG_STOCH_D",
-    "SIG_MACD", "SIG_CCI", "SIG_MFI", "SIG_AD", "SIG_OBV", "SIG_ROC"]
-    
+        "Open","High","Low","Close","Adj Close","Volume",
+        *[f"SIG_SMA_{i}" for i in (10,30,50,200)],
+        *[f"SIG_EMA_{i}" for i in (10,30,50,200)],
+        "SIG_MOM","SIG_STOCHRSI","SIG_STOCH_K","SIG_STOCH_D",
+        "SIG_MACD","SIG_CCI","SIG_MFI","SIG_AD","SIG_OBV","SIG_ROC"
+    ]
+
     print("Creating datasets...")
-    dataset_create_start = time()
-    
-    # Train/Val/Test split
+    t0 = time()
     train_dataset = StockDataset(
         folder_processed_csv=processed_data_folder,
         window_size=window_size,
@@ -338,10 +308,8 @@ if __name__ == "__main__":
         out_embed_dim=d_model,
         split="train",
         use_all_stocks=True,
-        cache_file="cache_train.pkl"  # Caching enabled
+        cache_file="cache_train.pkl"
     )
-
-
     val_dataset = StockDataset(
         folder_processed_csv=processed_data_folder,
         window_size=window_size,
@@ -349,11 +317,10 @@ if __name__ == "__main__":
         non_time_feature_cols=non_time_feature_cols,
         time_embed_dim=64,
         out_embed_dim=d_model,
-        split="val",    # <--- key
+        split="val",
         use_all_stocks=True,
         cache_file="cache_val.pkl"
     )
-
     test_dataset = StockDataset(
         folder_processed_csv=processed_data_folder,
         window_size=window_size,
@@ -361,175 +328,86 @@ if __name__ == "__main__":
         non_time_feature_cols=non_time_feature_cols,
         time_embed_dim=64,
         out_embed_dim=d_model,
-        split="test",   # <--- key
+        split="test",
         use_all_stocks=True,
         cache_file="cache_test.pkl"
     )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    test_loader  = DataLoader(test_dataset,  batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    print(f"Datasets built in {time()-t0:.2f}s")
 
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True,  collate_fn=collate_fn)
-    # right after you build train_loader
-    #warmup_steps = len(train_loader)
-    val_loader   = DataLoader(val_dataset,   batch_size=32, shuffle=False, collate_fn=collate_fn)
-    test_loader  = DataLoader(test_dataset,  batch_size=32, shuffle=False, collate_fn=collate_fn)
-    print(f"Dataset creation took {time() - dataset_create_start:.2f} seconds.")
-    
     print("Instantiating model...")
-    instantation_start = time()
-    # Instantiate STST Model with LSTM
     model = STSTModel(
         d_model=d_model,
         num_layers=num_transformer_layers,
         nhead=nhead,
-        dim_feedforward=dim_feedforward,
+        dim_feedforward=dim_ff,
         attn_dropout=attn_dropout,
         ff_dropout=ff_dropout,
         n_lstm_layers=n_lstm_layers,
         d_lstm_hidden=d_lstm_hidden,
         classifier_hidden=classifier_hidden
     )
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-3)
+    criterion = nn.BCEWithLogitsLoss()  # ou Soft+Hybrid si souhaité
 
-    # Optimizer and loss
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    # Entraînement
+    model, train_losses, val_losses, \
+        train_accs, val_accs, \
+        train_p0, train_p1, val_p0, val_p1, \
+        train_lrs = train_model(
+            model, train_loader, val_loader,
+            num_epochs, optimizer, criterion,
+            warmup_steps, device,
+            save_path="best.pth", log_path="val_debug.csv"
+        )
 
-    # 1) Récupère tous les labels de train
-    labels = [y for (_, y) in train_dataset.sequences]  # sequences = [(E_X, y), ...]
-    cnt    = Counter(labels)
-    n0, n1 = cnt[0], cnt[1]
-
-    # 2) Construis le pos_weight
-    pos_weight = torch.tensor([n0 / n1], dtype=torch.float, device=device)
-    print(f"  → pos_weight = {pos_weight.item():.3f} (n0={n0}, n1={n1})")
-
-    # 3) Instancie ta loss pondérée
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-    #criterion = nn.BCEWithLogitsLoss()  # Binary classification
-    print(f"Model instantiation took {time() - instantation_start:.2f} seconds.")
-    
-    print("Starting training...")
-    # juste avant d’entrer dans train_model()
-    log_path = "val_debug.csv"
-    with open(log_path, "w", newline="") as csvfile:
-        fieldnames = ["epoch", "batch_idx", "mean_prob", "count_0", "count_1"]
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-
-    training_start = time()
-    model, train_losses, val_losses, train_accs, val_accs, train_props0, train_props1, val_props0, val_props1, train_lrs = train_model(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        num_epochs=num_epochs,
-        optimizer=optimizer,
-        criterion=criterion,
-        warmup_steps=warmup_steps,
-        device=device,
-        log_path="val_debug.csv"
-    )
-    print(f"Training took {time() - training_start:.2f} seconds.")
-    
-    # After evaluating over the test loader, collect all predictions and true labels:
-    all_preds = []
-    all_targets = []
-
-    start_test = time()
-
-    # --- calcul du seuil optimal sur la VAL ---
-    model.eval()
-    all_val_probs   = []
-    all_val_targets = []
-
-    with torch.no_grad():
-        for Xv, yv in val_loader:
-            Xv = Xv.to(device)
-            yv = yv.to(device).float()
-            logits = model(Xv)
-            probs  = torch.sigmoid(logits)
-            all_val_probs.extend(probs.cpu().numpy())
-            all_val_targets.extend(yv.cpu().numpy())
-
-    # ROC pour récupérer thresholds
-    #fpr, tpr, thresholds = roc_curve(all_val_targets, all_val_probs)
-    # maximise Youden’s J = tpr − fpr
-    #j_scores      = tpr - fpr
-    #ix_opt        = np.argmax(j_scores)
-    #opt_threshold = thresholds[ix_opt]
-    #print(f"Seuil optimal sur VAL  = {opt_threshold:.3f} (J={j_scores[ix_opt]:.3f})")
-
-    threshs = np.linspace(np.min(all_val_probs), np.max(all_val_probs), 100)
-    f1s = [f1_score(all_val_targets, np.array(all_val_probs)>=t) for t in threshs]
-    best_idx = np.argmax(f1s)
-    opt_threshold = threshs[best_idx]            # ← on l’appelle opt_threshold
-    print(f"Seuil F1-optimal = {opt_threshold:.3f} (F1={f1s[best_idx]:.3f})")
-
-    model.eval()
+    # Évaluation sur test
+    all_preds, all_targets = [], []
     with torch.no_grad():
         for X_test, y_test in test_loader:
             X_test = X_test.to(device)
-            y_test = y_test.to(device).float()
-            
-            outputs = model(X_test)            # (batch,)
-            preds = (torch.sigmoid(outputs) >= opt_threshold).long().cpu().numpy()
-            #preds = (outputs >= 0.5).long().cpu().numpy()
+            logits = model(X_test)
+            probs  = torch.sigmoid(logits)
+            preds  = (probs >= 0.5).long().detach().cpu().numpy()
             all_preds.extend(preds)
-            all_targets.extend(y_test.cpu().numpy())
+            all_targets.extend(y_test.detach().cpu().numpy())
 
-    #Vérfier la distribution de logits
+    # AUC
     test_probs = []
     with torch.no_grad():
         for X_test, _ in test_loader:
             X_test = X_test.to(device)
-            logits = model(X_test)
-            test_probs.extend(torch.sigmoid(logits).cpu().numpy())
+            probs  = torch.sigmoid(model(X_test))
+            test_probs.extend(probs.detach().cpu().numpy())
+    auc = roc_auc_score(all_targets, test_probs)
 
-    print(f"Test probs  min={np.min(test_probs):.3f}, mean={np.mean(test_probs):.3f},  max={np.max(test_probs):.3f}")
-
-    # Compute Accuracy:
     acc = accuracy_score(all_targets, all_preds)
-
-    # Compute MCC:
     mcc = matthews_corrcoef(all_targets, all_preds)
+    print(f"Test preds 0→{all_preds.count(0)/len(all_preds):.2%}, 1→{all_preds.count(1)/len(all_preds):.2%}")
+    print(f"Test Accuracy: {acc:.4f}  |  Test MCC: {mcc:.4f}  |  Test AUC: {auc:.4f}")
 
-    n0 = all_preds.count(0)
-    n1 = all_preds.count(1)
-    total = n0 + n1
-    print(f"Test preds 0→{n0/total:.2%}, 1→{n1/total:.2%}")
-    print(f"Test Accuracy: {acc:.4f}  |  Test MCC: {mcc:.4f}")
-    print(f"Test MCC: {mcc:.4f}")
-    print(f"Testing took {time() - start_test:.2f} seconds.")
-
-    epochs = list(range(1, len(train_losses)+1))
+    # Plot métriques
+    epochs = np.arange(1, len(train_losses)+1)
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    ax1, ax2, ax3, ax4 = axes.flatten()
 
-    ax1 = axes[0,0]
-    ax2 = axes[0,1]
-    ax3 = axes[1,0]
-    ax4 = axes[1,1]
-
-    # 1) Loss
     ax1.plot(epochs, train_losses, label="Train Loss")
     ax1.plot(epochs, val_losses,   label="Val Loss")
-    ax1.set_title("Loss"); ax1.set_xlabel("Epoch"); ax1.set_ylabel("Loss")
-    ax1.legend(); ax1.grid()
+    ax1.set(title="Loss", xlabel="Epoch", ylabel="Loss"); ax1.legend(); ax1.grid()
 
-    # 2) Accuracy
     ax2.plot(epochs, train_accs, label="Train Acc")
     ax2.plot(epochs, val_accs,   label="Val Acc")
-    ax2.set_title("Accuracy"); ax2.set_xlabel("Epoch"); ax2.set_ylabel("Acc")
-    ax2.legend(); ax2.grid()
+    ax2.set(title="Accuracy", xlabel="Epoch", ylabel="Acc"); ax2.legend(); ax2.grid()
 
-    # 3) Proportions de classes
-    ax3.plot(epochs, train_props0, label="Train 0");  ax3.plot(epochs, train_props1, label="Train 1")
-    ax3.plot(epochs,   val_props0, '--', label="Val 0"); ax3.plot(epochs,   val_props1, '--', label="Val 1")
-    ax3.set_title("Proportions prédictions"); ax3.set_xlabel("Epoch"); ax3.set_ylabel("Prop")
-    ax3.legend(); ax3.grid()
+    ax3.plot(epochs, train_p0, label="Train 0"); ax3.plot(epochs, train_p1, label="Train 1")
+    ax3.plot(epochs, val_p0, '--', label="Val 0");   ax3.plot(epochs, val_p1, '--', label="Val 1")
+    ax3.set(title="Pred Proportions", xlabel="Epoch", ylabel="Prop"); ax3.legend(); ax3.grid()
 
-    # 4) Learning rate
     ax4.plot(epochs, train_lrs, label="LR")
-    ax4.set_title("Learning Rate"); ax4.set_xlabel("Epoch"); ax4.set_ylabel("LR")
-    ax4.grid()
+    ax4.set(title="Learning Rate", xlabel="Epoch", ylabel="LR"); ax4.grid()
 
     plt.tight_layout()
     plt.savefig("train_val_metrics_with_lr.png")
     plt.close(fig)
-             # ← closes the figure to free memory

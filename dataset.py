@@ -25,14 +25,14 @@ class SpatiotemporalEmbed(nn.Module):
 
         E_list = []
         for i in range(N):
-            # caractéristiques spatiales pour chaque pas de temps
+            # spatial features for each time step
             f_i = X_f[i]                      
-            # obtenir l'encodage temporel pour ce pas de temps
+            # get the temporal encoding for this time step
             time_row = X_t[i].unsqueeze(0)     
             with torch.no_grad():
                 t_embed = date2vec(time_row)  
             t_embed = t_embed.view(-1)       
-            # concaténer et projeter
+            # concatenate and project
             X_c_i = torch.cat([f_i, t_embed], dim=0) 
             E_list.append(self.dense(X_c_i))         
 
@@ -61,15 +61,15 @@ class StockDataset(Dataset):
         self.split = split.lower().strip()  
         self.cache_file = cache_file
 
-        #limites de date
+        # date limits
         self.train_end_date = pd.to_datetime("2015-08-08")
         self.val_end_date   = pd.to_datetime("2015-10-01")
         self.test_end_date  = pd.to_datetime("2016-01-01")
 
-        # charge Date2Vec pre train
+        # load pre-trained Date2Vec
         self.d2v = Date2VecConvert(model_path=date2vec_model_path)
 
-        #encodage spatio-temporel
+        # spatiotemporal encoding
         self.st_embed = SpatiotemporalEmbed(
             window_size=self.window_size,
             f=self.f,
@@ -77,16 +77,16 @@ class StockDataset(Dataset):
             d=self.out_embed_dim
         )
 
-        #si un fichier de cache existe, charger les séquences.
+        # if a cache file exists, load the sequences
         if cache_file is not None and os.path.exists(cache_file):
-            print(f"Chargement des données en cache depuis {cache_file}")
+            print(f"Loading cached data from {cache_file}")
             with open(cache_file, "rb") as f:
                 self.sequences = pickle.load(f)
         else:
-            print(f"Aucune donnée en cache")
+            print(f"No cached data")
             csv_paths = glob.glob(os.path.join(folder_processed_csv, "*.csv"))
             if not csv_paths:
-                raise FileNotFoundError(f"Aucun CSV trouvé dans {folder_processed_csv}.")
+                raise FileNotFoundError(f"No CSV found in {folder_processed_csv}.")
             self.data = []
             for path in csv_paths:
                 if use_all_stocks:
@@ -102,7 +102,7 @@ class StockDataset(Dataset):
 
             all_sequences = self.build_sequences(self.data)
             
-            #filtrer les séquences par division en fonction de la dernière date
+            # filter sequences by split based on the last date
             self.sequences = []
             for seq in all_sequences:
                 last_date = seq[2]
@@ -111,9 +111,9 @@ class StockDataset(Dataset):
             if cache_file is not None:
                 with open(cache_file, "wb") as f:
                     pickle.dump(self.sequences, f)
-                print(f"Données prétraitées mises en cache dans {cache_file}")
+                print(f"Preprocessed data cached in {cache_file}")
 
-    #filtre les séquences selon la division
+    # filter sequences according to the split
     def belongs_to_split(self, date: pd.Timestamp) -> bool:
         if self.split == "train":
             return date < self.train_end_date
@@ -122,9 +122,9 @@ class StockDataset(Dataset):
         elif self.split == "test":
             return (date >= self.val_end_date) and (date < self.test_end_date)
         else:
-            raise ValueError(f"Division inconnue : split={self.split}")
+            raise ValueError(f"Unknown split: split={self.split}")
 
-    ## construit les séquences à partir du DataFrame
+    # build sequences from the DataFrame
     def build_sequences(self, df: pd.DataFrame):
         sequences = []
         for symbol, grp in df.groupby("StockSymbol"):
@@ -140,19 +140,19 @@ class StockDataset(Dataset):
                     fvals = [float(row_data[col]) for col in self.non_time_cols]
                     X_f_list.append(fvals)
                     X_t_list.append([
-                        float(row_data["Year"]),    # année/3000
-                        float(row_data["Month"]),   # mois/12
-                        float(row_data["Day"]),     # jour/31
-                        float(row_data["Weekday"]), # jour semaine/7
+                        float(row_data["Year"]),    # year/3000
+                        float(row_data["Month"]),   # month/12
+                        float(row_data["Day"]),     # day/31
+                        float(row_data["Weekday"]), # weekday/7
                         0.0,                        # pad
                         0.0                         # pad
                     ])
                 X_f_np = np.array(X_f_list, dtype=np.float32)
                 X_t_np = np.array(X_t_list, dtype=np.float32)
-                # centrer-réduire chaque colonne de X_f_np
+                # standardize each column of X_f_np
                 mean = X_f_np.mean(axis=0, keepdims=True)   
                 std  = X_f_np.std(axis=0,  keepdims=True)    
-                X_f_np = (X_f_np - mean) / (std + 1e-6)       # éviter la div par zéro
+                X_f_np = (X_f_np - mean) / (std + 1e-6)       # avoid division by zero
                 
                 X_f_torch = torch.from_numpy(X_f_np)
                 X_t_torch = torch.from_numpy(X_t_np)
@@ -170,7 +170,7 @@ class StockDataset(Dataset):
         y_torch   = torch.tensor(y, dtype=torch.long)
         return E_X_torch, y_torch
 
-# regroupement
+# collation
 def collate_fn(batch):
     E_list, y_list = zip(*batch)
     E_tensor = torch.stack(E_list, dim=0)

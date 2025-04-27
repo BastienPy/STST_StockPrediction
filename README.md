@@ -2,57 +2,48 @@
 
 ## Description
 
-Ce projet implémente un modèle de prédiction de séries temporelles spatio-temporelles pour les données boursières. Il utilise des techniques avancées comme l'encodage temporel avec Date2Vec et des fenêtres glissantes pour capturer les dépendances temporelles et spatiales.
-
-## Fonctionnalités
-
-- Chargement et prétraitement des données boursières.
-- Encodage temporel basé sur le modèle Date2Vec.
-- Création de fenêtres glissantes pour les séries temporelles.
-- Modèle d'encodage spatio-temporel pour les prédictions.
-- Support pour la mise en cache des données prétraitées.
-- Division des données en ensembles d'entraînement, de validation et de test.
+This project implements a spatiotemporal time series prediction model for stock market data using the STST architecture.
 
 ## Installation
 
-1. Clonez ce dépôt :
+1. Clone this repository:
    ```bash
-   git clone <URL_DU_DEPOT>
+   git clone <REPOSITORY_URL>
    cd STST_StockPrediction
    ```
 
-2. Installez les dépendances nécessaires :
+2. Install the required dependencies:
    ```bash
    pip install -r requirements.txt
    ```
 
-## Utilisation
+## Usage
 
-### Entraînement du modèle
+### Training the Model
 
-1. Configurez les paramètres dans le script principal stst.py.
-2. Lancez l'entraînement :
+1. Configure the parameters in the main script `stst.py`.
+2. Start the training:
    ```bash
    python stst.py
    ```
 
-### Encodage temporel avec Date2Vec
+### Temporal Encoding with Date2Vec
 
-Le modèle Date2Vec est utilisé pour générer des embeddings temporels. Vous pouvez utiliser un modèle pré-entraîné ou entraîner un nouveau modèle en suivant les instructions dans le dossier `Date2Vec`.
+The Date2Vec model is used to generate temporal embeddings. You can use a pre-trained model or train a new one by following the instructions in the `Date2Vec` folder.
 
-## Structure du projet
+## Project Structure
 
 ```
 STST_StockPrediction/
-├── Date2Vec/               # Implémentation de Date2Vec
-├── data/                   # Données brutes et prétraitées
-├── models/                 # Modèles sauvegardés
-├── stst.py                 # Script principal
-├── dataset.py              # Gestion des données et des fenêtres glissantes
+├── Date2Vec/               # Date2Vec implementation
+├── data/                   # Raw and preprocessed data
+├── models/                 # Saved models
+├── stst.py                 # Main script
+├── dataset.py              # Data handling and sliding windows
 ├── README.md               # Documentation
-└── requirements.txt        # Dépendances Python
+└── requirements.txt        # Python dependencies
 ```
 
-## Résultats
+## Results
 
-Les résultats de l'entraînement, y compris les courbes de perte et d'exactitude, sont sauvegardés sous forme de graphiques dans le dossier de sortie.
+The training results, including loss and accuracy curves, are saved as graphs in the output folder.

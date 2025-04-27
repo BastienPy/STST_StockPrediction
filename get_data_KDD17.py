@@ -23,7 +23,6 @@ os.makedirs(output_dir, exist_ok=True)
 
 for ticker in tickers:
     
-    print(f"Téléchargement de {ticker}...")
     try:
         df = yf.download(ticker, start=start_date, end=end_date, auto_adjust=False)
         df = df[["Open", "High", "Low", "Close", "Adj Close", "Volume"]]
